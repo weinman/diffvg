@@ -122,6 +122,7 @@ def serialize_scene(canvas_width,
         args.append(tf.constant(output_type))
         args.append(tf.constant(use_prefiltering))
         for shape in shapes:
+            use_thickness = False
             if isinstance(shape, pydiffvg.Circle):
                 args.append(ShapeType.asTensor(diffvg.ShapeType.circle))
                 args.append(tf.identity(shape.radius))
@@ -135,7 +136,13 @@ def serialize_scene(canvas_width,
                 args.append(ShapeType.asTensor(diffvg.ShapeType.path))
                 args.append(tf.identity(shape.num_control_points))
                 args.append(tf.identity(shape.points))
+                if len(shape.stroke_width.shape) > 0 and shape.stroke_width.shape[0] > 1:
+                    use_thickness = True
+                    args.append(shape.stroke_width)
+                else:
+                    args.append(None)
                 args.append(tf.constant(shape.is_closed))
+                args.append(tf.constant(shape.use_distance_approx))
             elif isinstance(shape, pydiffvg.Polygon):
                 assert(shape.points.shape[1] == 2)
                 args.append(ShapeType.asTensor(diffvg.ShapeType.path))
@@ -151,7 +158,10 @@ def serialize_scene(canvas_width,
                 args.append(tf.identity(shape.p_max))
             else:
                 assert(False)
-            args.append(tf.identity(shape.stroke_width))
+            if use_thickness:
+                args.append(tf.constant(0.0))
+            else:
+                args.append(tf.identity(shape.stroke_width))
 
         for shape_group in shape_groups:
             args.append(tf.identity(shape_group.shape_ids))
@@ -258,15 +268,19 @@ def forward(width,
                 current_index += 1
                 points = args[current_index]
                 current_index += 1
+                thickness = args[current_index]
+                current_index += 1
                 is_closed = args[current_index]
+                current_index += 1
+                use_distance_approx = args[current_index]
                 current_index += 1
                 shape = diffvg.Path(diffvg.int_ptr(pydiffvg.data_ptr(num_control_points)),
                                     diffvg.float_ptr(pydiffvg.data_ptr(points)),
-                                    diffvg.float_ptr(0), # thickness
+                                    diffvg.float_ptr(pydiffvg.data_ptr(thickness) if thickness is not None else 0),
                                     num_control_points.shape[0],
                                     points.shape[0],
                                     is_closed,
-                                    tf.constant(False)) # use_distance_approx
+                                    use_distance_approx)
             elif shape_type == diffvg.ShapeType.rect:
                 p_min = args[current_index]
                 current_index += 1
@@ -529,6 +543,7 @@ def render(*x):
             for shape_id in range(scene.num_shapes):
                 d_args.append(None) # type
                 d_shape = scene.get_d_shape(shape_id)
+                use_thickness = False
                 if d_shape.type == diffvg.ShapeType.circle:
                     d_circle = d_shape.as_circle()
                     radius = tf.constant(d_circle.radius)
@@ -547,10 +562,18 @@ def render(*x):
                 elif d_shape.type == diffvg.ShapeType.path:
                     d_path = d_shape.as_path()
                     points = tf.zeros((d_path.num_points, 2), dtype=tf.float32)
-                    d_path.copy_to(diffvg.float_ptr(pydiffvg.data_ptr(points)),diffvg.float_ptr(0))
+                    thickness = None
+                    if d_path.has_thickness():
+                        use_thickness = True
+                        thickness = tf.zeros((d_path.num_points), dtype=tf.float32)
+                        d_path.copy_to(diffvg.float_ptr(pydiffvg.data_ptr(points)), pydiffvg.data_ptr(thickness))
+                    else:
+                        d_path.copy_to(diffvg.float_ptr(pydiffvg.data_ptr(points)),diffvg.float_ptr(0))
                     d_args.append(None) # num_control_points
                     d_args.append(points)
+                    d_args.append(thickness)
                     d_args.append(None) # is_closed
+                    d_args.append(None) # use_distance_approx
                 elif d_shape.type == diffvg.ShapeType.rect:
                     d_rect = d_shape.as_rect()
                     p_min = tf.constant((d_rect.p_min.x, d_rect.p_min.y))
@@ -559,8 +582,11 @@ def render(*x):
                     d_args.append(p_max)
                 else:
                     assert(False)
-                w = tf.constant((d_shape.stroke_width))
-                d_args.append(w)
+                if use_thickness:
+                    d_args.append(None)
+                else:
+                    w = tf.constant((d_shape.stroke_width))
+                    d_args.append(w)
 
             for group_id in range(scene.num_shape_groups):
                 d_shape_group = scene.get_d_shape_group(group_id)
